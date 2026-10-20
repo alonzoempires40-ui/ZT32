@@ -1,1 +1,67 @@
 
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Accept Android SDK licenses (preinstalled SDK)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Set up Gradle 8.11.1 (matches the project's AGP 8.9.2)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Locate or unzip the source
+        id: locate
+        run: |
+          SETTINGS=$(find . -name settings.gradle.kts -not -path '*/build/*' -not -path './.git/*' | head -1)
+          if [ -z "$SETTINGS" ]; then
+            ZIP=$(ls -t *.zip 2>/dev/null | head -1)
+            if [ -z "$ZIP" ]; then echo "::error::No settings.gradle.kts and no .zip in the repo."; exit 1; fi
+            mkdir -p _src && unzip -q "$ZIP" -d _src
+            SETTINGS=$(find _src -name settings.gradle.kts -not -path '*/build/*' | head -1)
+          fi
+          if [ -z "$SETTINGS" ]; then echo "::error::Zip extracted but no settings.gradle.kts inside."; exit 1; fi
+          DIR=$(dirname "$SETTINGS")
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          # Read the app name and version straight from the source, so the log and the
+          # artifact name always match what was actually built.
+          APPNAME=$(grep -oP '<string name="app_name">\K[^<]+' "$DIR/app/src/main/res/values/strings.xml" | head -1)
+          [ -z "$APPNAME" ] && APPNAME=App
+          VCODE=$(grep -oP 'versionCode = \K[0-9]+' "$DIR/app/build.gradle.kts" | head -1)
+          [ -z "$VCODE" ] && VCODE=0
+          VNAME=$(grep -oP 'versionName = "\K[^"]+' "$DIR/app/build.gradle.kts" | head -1)
+          echo "appname=$APPNAME" >> "$GITHUB_OUTPUT"
+          echo "vcode=$VCODE" >> "$GITHUB_OUTPUT"
+          echo "=== Building $APPNAME v$VCODE (versionName $VNAME) ==="
+
+      - name: Build debug APK
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Show APK size
+        run: |
+          echo "=== ${{ steps.locate.outputs.appname }} v${{ steps.locate.outputs.vcode }} ==="
+          find . -name "*.apk" -path "*outputs*" -exec ls -lh {} \;
+          find . -name "*.apk" -path "*outputs*" -exec stat -c '%s bytes  %n' {} \;
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.locate.outputs.appname }}-v${{ steps.locate.outputs.vcode }}-debug-apk
+          path: "**/outputs/apk/**/*.apk"
+          if-no-files-found: error
